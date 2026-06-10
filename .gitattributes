@@ -1,0 +1,8 @@
+# Shell-Skripte und Configs werden in Container gemountet -> muessen LF haben,
+# auch wenn das Repo unter Windows ausgecheckt wird.
+* text=auto
+*.sh text eol=lf
+*.cfg text eol=lf
+*.cnf text eol=lf
+*.yml text eol=lf
+Dockerfile text eol=lf

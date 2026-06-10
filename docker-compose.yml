@@ -1,0 +1,123 @@
+name: mariadb-cluster
+
+# Architektur:
+#   haproxy (172.18.0.10)  -> Single-Endpoint :3306, Active/Backup-Failover
+#   mariadb1 (172.18.0.11) -> Galera-Knoten, primaer
+#   mariadb2 (172.18.0.12) -> Galera-Knoten, Backup (springt bei Ausfall ein)
+#   garbd    (172.18.0.13) -> Galera-Arbitrator (Quorum-Stimme, haelt keine Daten)
+
+x-mariadb-base: &mariadb-base
+  image: mariadb:11.4
+  restart: unless-stopped
+  entrypoint: ["/usr/local/bin/galera-entrypoint.sh"]
+  healthcheck:
+    # Gesund = Galera-Status Synced (4) oder Donor (2, mit mariabackup weiter nutzbar)
+    test:
+      - CMD-SHELL
+      - >-
+        s=$$(mariadb -uhealth --connect-timeout=2 -N -B
+        -e "SHOW GLOBAL STATUS LIKE 'wsrep_local_state'" | awk '{print $$2}');
+        [ "$$s" = "4" ] || [ "$$s" = "2" ]
+    interval: 5s
+    timeout: 5s
+    retries: 5
+    start_period: 120s
+
+x-mariadb-env: &mariadb-env
+  MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?bitte scripts/deploy.sh ausfuehren oder .env anlegen}
+  MARIADB_DATABASE: ${MARIADB_DATABASE:-appdb}
+  MARIADB_USER: ${MARIADB_USER:-app}
+  MARIADB_PASSWORD: ${MARIADB_PASSWORD:?}
+  MARIADB_AUTO_UPGRADE: "1"
+  GALERA_CLUSTER_NAME: ${GALERA_CLUSTER_NAME:-mariadb-cluster}
+  GALERA_CLUSTER_ADDRESS: gcomm://172.18.0.11,172.18.0.12
+  GALERA_SST_PASSWORD: ${GALERA_SST_PASSWORD:?}
+  GALERA_GCACHE_SIZE: ${GALERA_GCACHE_SIZE:-512M}
+  INNODB_BUFFER_POOL_SIZE: ${INNODB_BUFFER_POOL_SIZE:-256M}
+  HAPROXY_IP: 172.18.0.10
+
+services:
+  mariadb1:
+    <<: *mariadb-base
+    container_name: mariadb1
+    hostname: mariadb1
+    environment:
+      <<: *mariadb-env
+      GALERA_NODE_NAME: mariadb1
+      GALERA_NODE_IP: 172.18.0.11
+      GALERA_PEERS: "172.18.0.12:4567 172.18.0.13:4567"
+      # Darf bei leerem Datadir einen NEUEN Cluster gruenden (nur wenn kein Peer laeuft)
+      GALERA_BOOTSTRAP_IF_NEW: "1"
+      GALERA_FORCE_BOOTSTRAP: ${FORCE_BOOTSTRAP_NODE1:-0}
+    volumes:
+      - mariadb1_data:/var/lib/mysql
+      - ./config/galera-entrypoint.sh:/usr/local/bin/galera-entrypoint.sh:ro
+      - ./config/initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      db_cluster:
+        ipv4_address: 172.18.0.11
+
+  mariadb2:
+    <<: *mariadb-base
+    container_name: mariadb2
+    hostname: mariadb2
+    depends_on:
+      - mariadb1
+    environment:
+      <<: *mariadb-env
+      GALERA_NODE_NAME: mariadb2
+      GALERA_NODE_IP: 172.18.0.12
+      GALERA_PEERS: "172.18.0.11:4567 172.18.0.13:4567"
+      GALERA_FORCE_BOOTSTRAP: ${FORCE_BOOTSTRAP_NODE2:-0}
+    volumes:
+      - mariadb2_data:/var/lib/mysql
+      - ./config/galera-entrypoint.sh:/usr/local/bin/galera-entrypoint.sh:ro
+      - ./config/initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      db_cluster:
+        ipv4_address: 172.18.0.12
+
+  garbd:
+    build: ./garbd
+    container_name: garbd
+    restart: unless-stopped
+    depends_on:
+      - mariadb1
+    # Arbitrator: dritte Quorum-Stimme, damit der ueberlebende Knoten bei einem
+    # Crash des anderen die Mehrheit (2/3) behaelt und Primary bleibt.
+    command:
+      - "--group"
+      - "${GALERA_CLUSTER_NAME:-mariadb-cluster}"
+      - "--address"
+      - "gcomm://172.18.0.11:4567,172.18.0.12:4567"
+    networks:
+      db_cluster:
+        ipv4_address: 172.18.0.13
+
+  haproxy:
+    build: ./haproxy
+    container_name: haproxy
+    restart: unless-stopped
+    depends_on:
+      - mariadb1
+      - mariadb2
+    ports:
+      - "${DB_PORT:-3306}:3306"
+      - "${STATS_PORT:-8404}:8404"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      db_cluster:
+        ipv4_address: 172.18.0.10
+
+volumes:
+  mariadb1_data:
+  mariadb2_data:
+
+networks:
+  db_cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/24
+          gateway: 172.18.0.1
