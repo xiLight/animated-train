@@ -10,7 +10,7 @@ set -euo pipefail
 # damit andere $-Zeichen in der Konfiguration unangetastet bleiben.
 envsubst '${IP_MARIADB1} ${IP_MARIADB2}' \
     < /usr/local/etc/haproxy/haproxy.cfg.tpl \
-    > /usr/local/etc/haproxy/haproxy.cfg
+    > /tmp/haproxy.cfg
 
 echo "[haproxy-entrypoint] Config gerendert: mariadb1=${IP_MARIADB1}, mariadb2=${IP_MARIADB2}"
-exec haproxy -f /usr/local/etc/haproxy/haproxy.cfg "$@"
+exec haproxy -f /tmp/haproxy.cfg "$@"

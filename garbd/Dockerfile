@@ -1,11 +1,7 @@
 # Galera Arbitrator (garbd): vollwertige Quorum-Stimme ohne Datenhaltung.
 # Verhindert, dass der ueberlebende Knoten bei einem Crash des anderen die
 # Mehrheit verliert und sich aus Sicherheitsgruenden selbst sperrt.
-FROM debian:bookworm-slim
+FROM mariadb:11.4
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends galera-arbitrator-4 \
- && rm -rf /var/lib/apt/lists/*
-
-USER nobody
+USER mysql
 ENTRYPOINT ["garbd"]
