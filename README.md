@@ -7,19 +7,19 @@ auf **einen** Endpunkt (`<host>:3306`) und merkt von Ausfällen praktisch nichts
 ```
                         Anwendung
                             │
-                       <host>:3306
+                       <host>:${DB_PORT}
                             │
                   ┌─────────▼─────────┐
-                  │      HAProxy      │  172.18.0.10
-                  │  Galera-Healtcheck│  Stats: :8404
+                  │      HAProxy      │  ${IP_HAPROXY}
+                  │  Galera-Healtcheck│  Stats: :${STATS_PORT}
                   └───┬───────────┬───┘
               aktiv   │           │   backup (springt nur bei Ausfall ein)
                   ┌───▼───┐   ┌───▼───┐
                   │mariadb1◄───►mariadb2│   Galera: synchrone Replikation
-                  │ .0.11 │   │ .0.12 │   (beide Knoten immer identisch)
+                  │  .11   │   │  .12  │   (beide Knoten immer identisch)
                   └───┬───┘   └───┬───┘
                       │  ┌─────┐  │
-                      └──► garbd◄──┘   172.18.0.13
+                      └──► garbd◄──┘   ${IP_GARBD}
                          └─────┘   Arbitrator: 3. Quorum-Stimme, keine Daten
 ```
 
@@ -53,15 +53,47 @@ Verbinden: `mariadb -h <host> -P 3306 -u app -p<MARIADB_PASSWORD> appdb`
 (Zugangsdaten stehen in `.env`). Root gibt es nur lokal im Container:
 `docker exec -it mariadb1 mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"`.
 
+## Portolan-Integration
+
+Ist [portolan](https://github.com/docker-public/portolan) auf dem Host
+installiert, erkennt `deploy.sh` das automatisch und:
+
+1. **Holt ein freies Subnet** aus dem konfigurierten Portolan-Pool
+2. **Prüft die Ports** `DB_PORT` und `STATS_PORT` auf Verfügbarkeit
+3. **Registriert** Subnet und Ports bei Portolan
+4. **Schreibt** alle Netzwerk-Variablen in die `.env`
+
+Bei jedem erneuten Deploy werden alte Registrierungen freigegeben und neue
+allokiert. `scripts/destroy.sh` räumt alles sauber auf.
+
+Ohne Portolan funktioniert alles wie bisher — die Werte aus `.env` (oder die
+Defaults aus `docker-compose.yml`) werden verwendet.
+
 ## Skripte
 
 | Skript | Zweck |
 |---|---|
-| `scripts/deploy.sh` | Erst-Deployment / Update. Idempotent. |
+| `scripts/deploy.sh` | Erst-Deployment / Update. Portolan-aware. |
+| `scripts/destroy.sh` | Stoppt den Cluster und gibt Portolan-Ressourcen frei. |
 | `scripts/status.sh` | Container-, Galera- und HAProxy-Status auf einen Blick. |
 | `scripts/failover-test.sh` | Killt `mariadb1` live und beweist Failover + Failback. |
 | `scripts/backup.sh` | Konsistenter Dump (`--single-transaction`) nach `./backups/`. |
 | `scripts/recover.sh` | Nur für den Katastrophenfall (s. unten). |
+
+## Netzwerk-Variablen
+
+Alle IPs und das Subnet sind über `.env` konfigurierbar:
+
+| Variable | Default | Beschreibung |
+|---|---|---|
+| `SUBNET` | `172.18.0.0/24` | Docker-Netzwerk CIDR |
+| `GATEWAY` | `172.18.0.1` | Docker-Netzwerk Gateway |
+| `IP_HAPROXY` | `172.18.0.10` | HAProxy-Container |
+| `IP_MARIADB1` | `172.18.0.11` | Galera-Knoten 1 |
+| `IP_MARIADB2` | `172.18.0.12` | Galera-Knoten 2 |
+| `IP_GARBD` | `172.18.0.13` | Galera-Arbitrator |
+| `DB_PORT` | `3306` | Host-Port für MariaDB |
+| `STATS_PORT` | `8404` | Host-Port für HAProxy-Stats |
 
 ## Verhalten im Fehlerfall
 
@@ -75,18 +107,15 @@ Verbinden: `mariadb -h <host> -P 3306 -u app -p<MARIADB_PASSWORD> appdb`
 
 ## Wichtige Hinweise
 
-- **Subnetz:** `172.18.0.0/24` ist fest vergeben (statische IPs für
-  Healthchecks und Galera). Kollidiert es auf dem Host mit einem bestehenden
-  Docker-Netz (`docker network ls` / `docker network inspect`), Subnetz in
-  `docker-compose.yml` anpassen — die IPs `.10`–`.13` und `HAPROXY_IP`
-  konsistent mitziehen.
+- **Subnetz:** Per Default `172.18.0.0/24`. Kollidiert es, entweder Portolan
+  nutzen (automatisch) oder die Netzwerk-Variablen in `.env` manuell anpassen.
 - **Zeilenenden:** Die `.sh`/`.cfg`-Dateien werden in Container gemountet und
   müssen LF-Zeilenenden haben (regelt `.gitattributes`; unter Windows nichts
   mit CRLF speichern).
 - **Schreiben nur über HAProxy (`:3306`):** Die Knoten sind bewusst nicht
   direkt am Host exponiert. Direkt auf beide Knoten gleichzeitig zu schreiben
   funktioniert zwar (Multi-Master), erhöht aber das Konfliktrisiko.
-- **Monitoring:** HAProxy-Statusseite unter `http://<host>:8404`, Details per
+- **Monitoring:** HAProxy-Statusseite unter `http://<host>:${STATS_PORT}`, Details per
   `./scripts/status.sh`.
 - **Galera-Eigenheiten:** Nur InnoDB-Tabellen werden repliziert; jede Tabelle
   braucht einen Primary Key; `LOCK TABLES` wird nicht unterstützt.

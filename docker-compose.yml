@@ -1,10 +1,13 @@
 name: mariadb-cluster
 
 # Architektur:
-#   haproxy (172.18.0.10)  -> Single-Endpoint :3306, Active/Backup-Failover
-#   mariadb1 (172.18.0.11) -> Galera-Knoten, primaer
-#   mariadb2 (172.18.0.12) -> Galera-Knoten, Backup (springt bei Ausfall ein)
-#   garbd    (172.18.0.13) -> Galera-Arbitrator (Quorum-Stimme, haelt keine Daten)
+#   haproxy  (IP_HAPROXY)   -> Single-Endpoint :3306, Active/Backup-Failover
+#   mariadb1 (IP_MARIADB1)  -> Galera-Knoten, primaer
+#   mariadb2 (IP_MARIADB2)  -> Galera-Knoten, Backup (springt bei Ausfall ein)
+#   garbd    (IP_GARBD)     -> Galera-Arbitrator (Quorum-Stimme, haelt keine Daten)
+#
+# Netzwerk-Variablen koennen in .env gesetzt werden.
+# scripts/deploy.sh befuellt sie automatisch via portolan (falls verfuegbar).
 
 x-mariadb-base: &mariadb-base
   image: mariadb:11.4
@@ -30,11 +33,11 @@ x-mariadb-env: &mariadb-env
   MARIADB_PASSWORD: ${MARIADB_PASSWORD:?}
   MARIADB_AUTO_UPGRADE: "1"
   GALERA_CLUSTER_NAME: ${GALERA_CLUSTER_NAME:-mariadb-cluster}
-  GALERA_CLUSTER_ADDRESS: gcomm://172.18.0.11,172.18.0.12
+  GALERA_CLUSTER_ADDRESS: gcomm://${IP_MARIADB1:-172.18.0.11},${IP_MARIADB2:-172.18.0.12}
   GALERA_SST_PASSWORD: ${GALERA_SST_PASSWORD:?}
   GALERA_GCACHE_SIZE: ${GALERA_GCACHE_SIZE:-512M}
   INNODB_BUFFER_POOL_SIZE: ${INNODB_BUFFER_POOL_SIZE:-256M}
-  HAPROXY_IP: 172.18.0.10
+  HAPROXY_IP: ${IP_HAPROXY:-172.18.0.10}
 
 services:
   mariadb1:
@@ -44,8 +47,8 @@ services:
     environment:
       <<: *mariadb-env
       GALERA_NODE_NAME: mariadb1
-      GALERA_NODE_IP: 172.18.0.11
-      GALERA_PEERS: "172.18.0.12:4567 172.18.0.13:4567"
+      GALERA_NODE_IP: ${IP_MARIADB1:-172.18.0.11}
+      GALERA_PEERS: "${IP_MARIADB2:-172.18.0.12}:4567 ${IP_GARBD:-172.18.0.13}:4567"
       # Darf bei leerem Datadir einen NEUEN Cluster gruenden (nur wenn kein Peer laeuft)
       GALERA_BOOTSTRAP_IF_NEW: "1"
       GALERA_FORCE_BOOTSTRAP: ${FORCE_BOOTSTRAP_NODE1:-0}
@@ -55,7 +58,7 @@ services:
       - ./config/initdb:/docker-entrypoint-initdb.d:ro
     networks:
       db_cluster:
-        ipv4_address: 172.18.0.11
+        ipv4_address: ${IP_MARIADB1:-172.18.0.11}
 
   mariadb2:
     <<: *mariadb-base
@@ -66,8 +69,8 @@ services:
     environment:
       <<: *mariadb-env
       GALERA_NODE_NAME: mariadb2
-      GALERA_NODE_IP: 172.18.0.12
-      GALERA_PEERS: "172.18.0.11:4567 172.18.0.13:4567"
+      GALERA_NODE_IP: ${IP_MARIADB2:-172.18.0.12}
+      GALERA_PEERS: "${IP_MARIADB1:-172.18.0.11}:4567 ${IP_GARBD:-172.18.0.13}:4567"
       GALERA_FORCE_BOOTSTRAP: ${FORCE_BOOTSTRAP_NODE2:-0}
     volumes:
       - mariadb2_data:/var/lib/mysql
@@ -75,7 +78,7 @@ services:
       - ./config/initdb:/docker-entrypoint-initdb.d:ro
     networks:
       db_cluster:
-        ipv4_address: 172.18.0.12
+        ipv4_address: ${IP_MARIADB2:-172.18.0.12}
 
   garbd:
     build: ./garbd
@@ -89,10 +92,10 @@ services:
       - "--group"
       - "${GALERA_CLUSTER_NAME:-mariadb-cluster}"
       - "--address"
-      - "gcomm://172.18.0.11:4567,172.18.0.12:4567"
+      - "gcomm://${IP_MARIADB1:-172.18.0.11}:4567,${IP_MARIADB2:-172.18.0.12}:4567"
     networks:
       db_cluster:
-        ipv4_address: 172.18.0.13
+        ipv4_address: ${IP_GARBD:-172.18.0.13}
 
   haproxy:
     build: ./haproxy
@@ -101,14 +104,15 @@ services:
     depends_on:
       - mariadb1
       - mariadb2
+    environment:
+      IP_MARIADB1: ${IP_MARIADB1:-172.18.0.11}
+      IP_MARIADB2: ${IP_MARIADB2:-172.18.0.12}
     ports:
       - "${DB_PORT:-3306}:3306"
       - "${STATS_PORT:-8404}:8404"
-    volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     networks:
       db_cluster:
-        ipv4_address: 172.18.0.10
+        ipv4_address: ${IP_HAPROXY:-172.18.0.10}
 
 volumes:
   mariadb1_data:
@@ -119,5 +123,5 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.18.0.0/24
-          gateway: 172.18.0.1
+        - subnet: ${SUBNET:-172.18.0.0/24}
+          gateway: ${GATEWAY:-172.18.0.1}
